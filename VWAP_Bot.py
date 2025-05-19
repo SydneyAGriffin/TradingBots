@@ -87,6 +87,7 @@ class VWAPBot:
         self.vwap = 0.0
         self.sma = None
         self.account_balance = 1000.0  # Starting balance (adjust as needed)
+        self.debug_mode = True  # Enable debug logs
 
         # Initialize connection at 2:00 AM PDT
         self.start_connection()
@@ -112,12 +113,13 @@ class VWAPBot:
 
         # Sleep until 6:30 AM PDT
         now = datetime.now(PACIFIC_TZ)
+        logger.info(f"Current time: {now}")
         target_time = now.replace(hour=6, minute=30, second=0, microsecond=0)
         if now.hour >= 6 and now.minute >= 30:
             target_time += timedelta(days=1)
         seconds_to_sleep = (target_time - now).total_seconds()
+        logger.info(f"Sleeping until 6:30 AM PDT ({seconds_to_sleep:.0f} seconds)")
         if seconds_to_sleep > 0:
-            logger.info(f"Sleeping until 6:30 AM PDT ({seconds_to_sleep:.0f} seconds)")
             time.sleep(seconds_to_sleep)
 
         # Initialize trading
@@ -130,7 +132,7 @@ class VWAPBot:
         contract = self.create_contract()
         self.ib.reqIds(-1)
         self.ib.reqHistoricalData(
-            self.req_id, contract, "", "1 D", self.bar_size_str, "TRADES", 1, 1, True, []
+            self.req_id, contract, "", "2 D", self.bar_size_str, "TRADES", 1, 1, True, []
         )
 
     def create_contract(self):
@@ -160,12 +162,18 @@ class VWAPBot:
 
     def get_position_size(self):
         """Determine number of shares based on account balance."""
+        quantity = 1  # Default 1 share
         if self.account_balance > 5000:
-            return 2  # Scale to 2 shares if balance > $5,000
-        return 1  # Default to 1 share
+            quantity = 2  # Scale to 2 shares if balance > $5,000
+        if self.debug_mode:
+            logger.info(f"Calculated position size: {quantity} shares (balance: ${self.account_balance:.2f})")
+        return quantity
 
     def bracket_order(self, parent_order_id, action, quantity, profit_target):
         """Create bracket order with trailing stop."""
+        if not isinstance(quantity, int) or quantity <= 0:
+            logger.error(f"Invalid quantity: {quantity}. Must be a positive integer.")
+            return []
         contract = self.create_contract()
         # Parent order
         parent = Order()
@@ -195,6 +203,7 @@ class VWAPBot:
         trailing_stop_order.parentId = parent_order_id
         trailing_stop_order.transmit = True
 
+        logger.info(f"Created bracket order: {quantity} shares, Profit target: ${profit_target:.2f}")
         return [parent, profit_order, trailing_stop_order]
 
     def on_bar_update(self, reqId, bar, realtime):
@@ -228,6 +237,9 @@ class VWAPBot:
             # On bar close
             minutes_diff = (bar_time - datetime.combine(bar_time.date(), datetime.min.time(), EASTERN_TZ)).total_seconds() / 60.0
             if minutes_diff > 0 and minutes_diff % self.bar_size < 1e-6:
+                if self.debug_mode:
+                    logger.info(f"Processing bar: Time {bar_time}, Close {bar.close:.2f}, Volume {bar.volume}")
+
                 # Skip first 15 minutes (9:30–9:45 AM EDT)
                 if bar_time.hour == 9 and bar_time.minute < 45:
                     logger.info("Skipping trade: Within first 15 minutes of market open")
@@ -263,6 +275,8 @@ class VWAPBot:
                         quantity = self.get_position_size()
                         profit_target = self.vwap * 1.01
                         bracket = self.bracket_order(ORDER_ID, "BUY", quantity, profit_target)
+                        if not bracket:  # Invalid quantity
+                            return
                         contract = self.create_contract()
                         oca_group = f"OCA_{ORDER_ID}"
                         for order in bracket:
@@ -272,6 +286,8 @@ class VWAPBot:
                         self.position_active = True
                         self.trades_today += 1
                         logger.info(f"Placed buy order for {quantity} shares")
+                    elif self.debug_mode:
+                        logger.info(f"No buy signal: Position {self.position_active}, Trades {self.trades_today}, Price {bar.close:.2f}, VWAP {self.vwap:.2f}, SMA {self.sma:.2f}")
 
                 # Append closed bar
                 self.bars.append(self.current_bar)
